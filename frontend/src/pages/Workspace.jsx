@@ -534,7 +534,7 @@ export default function Workspace() {
                 initialContent={currentChapter.content}
                 chapterTitle={currentChapter.title}
                 onSave={handleSaveEditor}
-                onAnalyze={handleAnalyzeChapter}
+                onAnalyze={handleRunContinuityScan}
                 analyzing={analyzing}
                 onCollapse={() => setIsCenterOpen(false)}
               />

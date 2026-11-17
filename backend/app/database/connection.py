@@ -64,28 +64,6 @@ def init_db():
     except Exception as e:
         print(f"[DB Warning] Could not auto-run database migrations on startup: {e}")
 
-    # Direct fast-path for critical user & project isolation columns on PostgreSQL / SQLite
-    try:
-        with engine.connect() as conn:
-            fast_path_stmts = [
-                "ALTER TABLE users ADD COLUMN IF NOT EXISTS full_name VARCHAR(255);",
-                "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE;",
-                "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_superuser BOOLEAN DEFAULT FALSE;",
-                "ALTER TABLE users ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;",
-                "ALTER TABLE projects ADD COLUMN IF NOT EXISTS is_demo BOOLEAN DEFAULT FALSE;",
-                "ALTER TABLE projects ADD COLUMN IF NOT EXISTS user_id UUID REFERENCES users(id) ON DELETE SET NULL;",
-                "ALTER TABLE public.projects DROP CONSTRAINT IF EXISTS projects_user_id_fkey;",
-                "ALTER TABLE public.projects ADD CONSTRAINT projects_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE SET NULL;",
-            ]
-            for stmt in fast_path_stmts:
-                try:
-                    conn.execute(text(stmt))
-                    conn.commit()
-                except Exception:
-                    conn.rollback()
-    except Exception as ddl_err:
-        print(f"[DB Note] Direct fast-path column ensure skipped: {ddl_err}")
-
     # Dialect-agnostic column migrations using SQLAlchemy inspection
     columns_to_ensure = [
         ("users", "full_name", "VARCHAR(255)"),
