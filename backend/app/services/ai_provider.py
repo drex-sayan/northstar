@@ -3,7 +3,12 @@ import json
 import logging
 import re
 import time
+import warnings
 from typing import Dict, Any, Optional, List
+
+# Suppress noisy upstream Google SDK deprecation FutureWarnings
+warnings.filterwarnings("ignore", category=FutureWarning, module=r"google\.(api_core|generativeai)")
+
 from app.config import settings
 
 logger = logging.getLogger("ai_provider")
@@ -61,8 +66,10 @@ class AIProviderService:
 
         # Attempt to configure legacy google.generativeai as backup
         try:
-            import google.generativeai as legacy_genai
-            legacy_genai.configure(api_key=self.api_key)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", category=FutureWarning)
+                import google.generativeai as legacy_genai
+                legacy_genai.configure(api_key=self.api_key)
             self._legacy_configured = True
         except Exception:
             self._legacy_configured = False
