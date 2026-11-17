@@ -16,13 +16,13 @@ if db_url.startswith("sqlite"):
     connect_args = {"check_same_thread": False}
 elif "postgres" in db_url:
     connect_args = {
-        "connect_timeout": 5,
-        "options": "-c statement_timeout=5000 -c lock_timeout=3000"
+        "connect_timeout": 10,
+        "options": "-c statement_timeout=30000 -c lock_timeout=15000"
     }
     engine_kwargs.update({
         "pool_size": 5,
-        "max_overflow": 5,
-        "pool_timeout": 5,
+        "max_overflow": 10,
+        "pool_timeout": 15,
         "pool_recycle": 300
     })
 

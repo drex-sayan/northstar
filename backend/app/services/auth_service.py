@@ -74,23 +74,38 @@ class AuthService:
         except Exception:
             pass
 
-        statements = [
-            "ALTER TABLE users ADD COLUMN IF NOT EXISTS full_name VARCHAR(255);",
-            "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE;",
-            "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_superuser BOOLEAN DEFAULT FALSE;",
-            "ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;",
-            "ALTER TABLE users ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;"
+        try:
+            from sqlalchemy import inspect
+            insp = inspect(db.get_bind())
+            existing_cols = {c["name"] for c in insp.get_columns("users")}
+        except Exception:
+            existing_cols = set()
+
+        columns_needed = [
+            ("full_name", "VARCHAR(255)"),
+            ("is_active", "BOOLEAN DEFAULT TRUE"),
+            ("is_superuser", "BOOLEAN DEFAULT FALSE"),
+            ("created_at", "TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP"),
+            ("updated_at", "TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP")
         ]
-        for stmt in statements:
-            try:
-                db.execute(text(stmt))
-                db.commit()
-            except Exception as ex:
+
+        # Only execute ALTER TABLE if a column is genuinely missing
+        missing = [col for col, _ in columns_needed if col not in existing_cols]
+        if not missing and existing_cols:
+            return
+
+        for col_name, col_type in columns_needed:
+            if col_name not in existing_cols:
+                stmt = f"ALTER TABLE users ADD COLUMN IF NOT EXISTS {col_name} {col_type};"
                 try:
-                    db.rollback()
-                except Exception:
-                    pass
-                logger.warning(f"[Auth Healing Note] {stmt} -> {ex}")
+                    db.execute(text(stmt))
+                    db.commit()
+                except Exception as ex:
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+                    logger.warning(f"[Auth Healing Note] {stmt} -> {ex}")
         logger.info("[Auth Service] Self-healed users table missing columns successfully.")
 
     @classmethod
@@ -102,11 +117,21 @@ class AuthService:
         try:
             return db.query(models.User).filter(models.User.email.ilike(clean_email)).first()
         except Exception as e:
+            try:
+                db.rollback()
+            except Exception:
+                pass
             err_str = str(e).lower()
-            if any(term in err_str for term in ["is_superuser", "undefinedcolumn", "no such column", "users."]):
+            if "lock" in err_str or "timeout" in err_str:
+                logger.warning(f"[AuthService] Query lock/timeout on users table: {e}")
+                raise e
+            if any(term in err_str for term in ["undefinedcolumn", "no such column"]):
                 logger.warning(f"[AuthService] Detected missing column on users table query ({e}). Self-healing...")
                 cls._heal_users_table(db)
-                return db.query(models.User).filter(models.User.email.ilike(clean_email)).first()
+                try:
+                    return db.query(models.User).filter(models.User.email.ilike(clean_email)).first()
+                except Exception:
+                    return None
             raise e
 
     @classmethod
@@ -118,11 +143,21 @@ class AuthService:
         try:
             return db.query(models.User).filter(models.User.id == uid_str).first()
         except Exception as e:
+            try:
+                db.rollback()
+            except Exception:
+                pass
             err_str = str(e).lower()
-            if any(term in err_str for term in ["is_superuser", "undefinedcolumn", "no such column", "users."]):
+            if "lock" in err_str or "timeout" in err_str:
+                logger.warning(f"[AuthService] Query lock/timeout on users table: {e}")
+                raise e
+            if any(term in err_str for term in ["undefinedcolumn", "no such column"]):
                 logger.warning(f"[AuthService] Detected missing column on users table query ({e}). Self-healing...")
                 cls._heal_users_table(db)
-                return db.query(models.User).filter(models.User.id == uid_str).first()
+                try:
+                    return db.query(models.User).filter(models.User.id == uid_str).first()
+                except Exception:
+                    return None
             raise e
 
     @classmethod
