@@ -42,6 +42,7 @@ class AIProviderService:
     def __init__(self):
         self.api_key = ""
         self.groq_api_key = ""
+        self._groq_cooldown_until = 0.0
         self._genai_client = None
         self._legacy_configured = False
         self._init_client()
@@ -84,19 +85,19 @@ class AIProviderService:
             self.groq_api_key = current_env_groq_key
 
         provider = (getattr(settings, "AI_PROVIDER", "") or os.getenv("AI_PROVIDER", "groq")).lower().strip()
+        current_env_gemini_key = (settings.GEMINI_API_KEY or os.getenv("GOOGLE_API_KEY", "") or os.getenv("GEMINI_API_KEY", "")).strip().strip('"').strip("'")
+        if not self.api_key or self.api_key != current_env_gemini_key or not self._genai_client:
+            self.api_key = current_env_gemini_key
+            self._init_client()
+
         if provider == "groq" or (self.groq_api_key and not self.api_key):
             groq_res = self._generate_json_groq(prompt, system_instruction=system_instruction)
             if groq_res is not None:
                 return groq_res
             # If Groq quota exhausted or failed, seamlessly fallback to Gemini if key available
-            current_env_gemini_key = (settings.GEMINI_API_KEY or os.getenv("GOOGLE_API_KEY", "") or os.getenv("GEMINI_API_KEY", "")).strip().strip('"').strip("'")
-            if not current_env_gemini_key or len(current_env_gemini_key) < 10:
+            if not self.api_key or len(self.api_key) < 10:
                 return None
-            logger.info("Groq models exhausted. Seamlessly attempting Gemini fallback...")
-
-        current_env_key = (settings.GEMINI_API_KEY or os.getenv("GOOGLE_API_KEY", "") or os.getenv("GEMINI_API_KEY", "")).strip().strip('"').strip("'")
-        if not self.api_key or self.api_key != current_env_key:
-            self._init_client()
+            logger.info("Groq rate limit/exhaustion active. Seamlessly executing Gemini fallback...")
 
         if not self.api_key or len(self.api_key) < 10:
             logger.debug("Valid GEMINI_API_KEY is not configured; relying on deterministic agent logic.")
@@ -181,6 +182,10 @@ class AIProviderService:
         """
         Sends structured prompt to Groq API with multi-model fallback and JSON parsing.
         """
+        if time.time() < self._groq_cooldown_until:
+            logger.debug(f"Groq is in rate-limit cooldown for another {int(self._groq_cooldown_until - time.time())}s. Routing to Gemini fallback.")
+            return None
+
         if not self.groq_api_key or len(self.groq_api_key) < 10:
             logger.debug("Valid GROQ_API_KEY is not configured; relying on deterministic agent logic.")
             return None
@@ -195,6 +200,8 @@ class AIProviderService:
                 models_to_try.append(m)
 
         for model_name in models_to_try:
+            if time.time() < self._groq_cooldown_until:
+                break
             try:
                 raw_text = self._call_groq_model(model_name, prompt, system_instruction=system_instruction)
                 if not raw_text or not raw_text.strip():
@@ -217,14 +224,16 @@ class AIProviderService:
             except Exception as e:
                 err_str = str(e).lower()
                 if "429" in err_str or "quota" in err_str or "rate limit" in err_str:
-                    logger.warning(f"Groq model '{model_name}' quota limited (429). Attempting fallback...")
+                    logger.warning(f"Groq model '{model_name}' quota limited (429). Activating cooldown and switching to Gemini fallback.")
+                    self._groq_cooldown_until = time.time() + 60.0
+                    break
                 elif "404" in err_str or "not found" in err_str or "model_not_found" in err_str:
                     logger.warning(f"Groq model '{model_name}' not found (404). Attempting fallback...")
                 else:
                     logger.warning(f"Groq model '{model_name}' call failed: {e}")
                 continue
 
-        logger.warning("All Groq candidate models failed or exhausted quota. Triggering deterministic fallback.")
+        logger.warning("Groq unavailable or exhausted quota. Triggering fallback.")
         return None
 
     def _call_groq_model(self, model_name: str, prompt: str, system_instruction: Optional[str] = None) -> str:
@@ -259,31 +268,15 @@ class AIProviderService:
             "response_format": {"type": "json_object"}
         }
 
-        with httpx.Client(timeout=45.0) as client:
-            resp = None
-            for attempt in range(3):
+        with httpx.Client(timeout=30.0) as client:
+            resp = client.post(url, headers=headers, json=payload)
+            if resp.status_code == 429:
+                self._groq_cooldown_until = time.time() + 60.0
+                logger.warning(f"Groq model '{model_name}' hit rate limit (429). Activating 60s cooldown and falling back immediately.")
+                return ""
+            if resp.status_code == 400 and ("response_format" in resp.text.lower() or "json" in resp.text.lower()):
+                payload.pop("response_format", None)
                 resp = client.post(url, headers=headers, json=payload)
-                if resp.status_code == 429:
-                    retry_after = 2.5
-                    try:
-                        ra = resp.headers.get("retry-after")
-                        if ra:
-                            retry_after = float(ra)
-                        else:
-                            reset_t = resp.headers.get("x-ratelimit-reset-tokens")
-                            if reset_t and "s" in reset_t:
-                                retry_after = float(reset_t.replace("s", ""))
-                    except Exception:
-                        pass
-                    sleep_time = min(max(retry_after, 1.5), 5.0)
-                    logger.info(f"Groq 429 rate limit hit for '{model_name}'. Backing off for {sleep_time:.1f}s before retry (attempt {attempt+1}/3)...")
-                    time.sleep(sleep_time)
-                    continue
-                if resp.status_code == 400 and ("response_format" in resp.text.lower() or "json" in resp.text.lower()):
-                    # Fallback if model does not support json_object response_format
-                    payload.pop("response_format", None)
-                    continue
-                break
 
             if resp is not None:
                 resp.raise_for_status()
